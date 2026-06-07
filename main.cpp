@@ -4,7 +4,9 @@
 #include <vector>
 const int MAX_MODEL_VAR_INPUT = 2;
 #include <cstdint>
+#include <functional>
 #include <memory>
+#include <string>
 
 class matrix {
 public:
@@ -106,8 +108,8 @@ bool mat_mul_tt(matrix &out, const matrix &a, const matrix &b) {
   return true;
 }
 
-bool mat_mul(matrix &out, matrix a, matrix b, bool zero_out, bool transpose_a,
-             bool transpose_b) {
+bool mat_mul(matrix &out, const matrix &a, const matrix &b, bool zero_out,
+             bool transpose_a, bool transpose_b) {
   short transpose = (transpose_a << 1) | transpose_b;
   if (zero_out) {
     out.mat_fill(0.0f);
@@ -143,9 +145,9 @@ void matrix::mat_scale(float x) {
   }
 }
 
-int mat_sum(const matrix &mat) {
+float mat_sum(const matrix &mat) {
   int size = mat.cols * mat.rows;
-  int sum = 0;
+  float sum = 0;
   for (int i = 0; i < size; i++) {
     sum += mat.data[i];
   }
@@ -169,10 +171,13 @@ bool mat_copy(matrix &out, const matrix &mat) {
 int mat_arg_max(const matrix &mat) {
   int size = mat.cols * mat.rows;
   float max = -INFINITY;
+  int ind = 0;
   for (int i = 0; i < size; i++) {
-    max = std::max(max, mat.data[i]);
+    if (mat.data[i] > max) {
+      ind = i;
+    }
   }
-  return max;
+  return ind;
 }
 
 bool mat_relu(matrix &out, const matrix &mat) {
@@ -182,7 +187,7 @@ bool mat_relu(matrix &out, const matrix &mat) {
 
   int size = out.cols * out.rows;
   for (int i = 0; i < size; i++) {
-    out.data[i] = std::max(0.0f, out.data[i]);
+    out.data[i] = std::max(0.0f, mat.data[i]);
   }
 
   return true;
@@ -196,7 +201,7 @@ bool mat_softmax(matrix &out, const matrix &mat) {
   float sum = 0.0f;
   int size = out.cols * out.rows;
   for (int i = 0; i < size; i++) {
-    out.data[i] = logf(mat.data[i]);
+    out.data[i] = expf(mat.data[i]);
     sum += out.data[i];
   }
 
@@ -260,49 +265,68 @@ int get_mv_operatoin_input_number(model_var_operation op) {
   case model_var_operation::Cross_entropy:
     return 2;
     break;
+  default:
+    return 0;
   }
 }
 
+std::string get_mv_operatoin_string(model_var_operation op) {
+  switch (op) {
+  case model_var_operation::Null:
+    return "null";
+    break;
+  case model_var_operation::Relu:
+    return "relu";
+    break;
+  case model_var_operation::Softmax:
+    return "softmax";
+    break;
+  case model_var_operation::Add:
+    return "add";
+    break;
+  case model_var_operation::Sub:
+    return "sub";
+    break;
+  case model_var_operation::Matmul:
+    return "matmul";
+    break;
+  case model_var_operation::Cross_entropy:
+    return "cross_entropy";
+    break;
+  default:
+    return "?";
+  }
+}
 struct model_program {
   std::vector<model_var *> vals;
-  int num_vals;
+  int num_vals = 0;
 };
 
 struct model_context {
-  int num_vals;
-  model_var *input;
-  model_var *output;
-  model_var *desired_output;
-  model_var *cost;
+  std::vector<std::unique_ptr<model_var>> vals;
+  int num_vals = 0;
+  model_var *input = nullptr;
+  model_var *output = nullptr;
+  model_var *desired_output = nullptr;
+  model_var *cost = nullptr;
   model_program forward;
   model_program cost_program;
 };
+
 struct model_var {
-  int index;
-  uint flag;
+  int index = 0;
+  uint flag = 0;
   std::unique_ptr<matrix> val;
   std::unique_ptr<matrix> grad;
-  model_var_operation op;
-  model_var *input[MAX_MODEL_VAR_INPUT];
+  model_var_operation op = model_var_operation::Null;
+  model_var *inputs[MAX_MODEL_VAR_INPUT] = {};
 
-  model_var(model_context &model, int rows, int cols, uint flags)
-      : index(model.num_vals++), val(std::make_unique<matrix>(rows, cols)),
-        flag(flags), op(model_var_operation::Null) {
+  model_var(int rows, int cols, uint flags)
+      : val(std::make_unique<matrix>(rows, cols)),
+        op(model_var_operation::Null), flag(flags) {
     if (flags & model_var_flag::MV_FLAG_REQUIRES_GRAD) {
       grad = std::make_unique<matrix>(rows, cols);
     }
-    if (flags & model_var_flag::MV_FLAG_INPUT) {
-      model.input = this;
-    };
-    if (flags & model_var_flag::MV_FLAG_OUTPUT) {
-      model.output = this;
-    };
-    if (flags & model_var_flag::MV_FLAG_DESIRED_OUTPUT) {
-      model.desired_output = this;
-    };
-    if (flags & model_var_flag::MV_FLAG_COST) {
-      model.cost = this;
-    };
   }
 };
 
@@ -316,49 +340,155 @@ struct model_desc {
   float learning_rate;
   int batch_size;
 };
-model_var unary_operation(model_context &model, model_var &input, uint flags,
-                          int rows, int cols, model_var_operation op) {
+
+model_var *mv_create(model_context &model, int rows, int cols, uint flags) {
+  auto var = std::make_unique<model_var>(rows, cols, flags);
+  var->index = model.num_vals++;
+  model_var *ptr = var.get();
+  model.vals.push_back(std::move(var));
+
+  if (flags & model_var_flag::MV_FLAG_INPUT) {
+    model.input = ptr;
+  };
+  if (flags & model_var_flag::MV_FLAG_OUTPUT) {
+    model.output = ptr;
+  };
+  if (flags & model_var_flag::MV_FLAG_DESIRED_OUTPUT) {
+    model.desired_output = ptr;
+  };
+  if (flags & model_var_flag::MV_FLAG_COST) {
+    model.cost = ptr;
+  };
+
+  return ptr;
+}
+
+model_var *unary_operation(model_context &model, model_var &input, uint flags,
+                           int rows, int cols, model_var_operation op) {
   if (input.flag & model_var_flag::MV_FLAG_REQUIRES_GRAD) {
     flags |= model_var_flag::MV_FLAG_REQUIRES_GRAD;
   }
 
-  model_var out(model, rows, cols, flags);
-  out.op = op;
-  out.input[0] = &input;
+  model_var *out = mv_create(model, rows, cols, flags);
+  out->op = op;
+  out->inputs[0] = &input;
 
   return out;
 }
 
-model_var binary_operation(model_context &model, model_var &input1,
-                           model_var &input2, uint flags, int rows, int cols,
-                           model_var_operation op) {
+model_var *binary_operation(model_context &model, model_var &input1,
+                            model_var &input2, uint flags, int rows, int cols,
+                            model_var_operation op) {
   if (input1.flag & model_var_flag::MV_FLAG_REQUIRES_GRAD ||
       input2.flag & model_var_flag::MV_FLAG_REQUIRES_GRAD) {
     flags |= model_var_flag::MV_FLAG_REQUIRES_GRAD;
   }
 
-  model_var out(model, rows, cols, flags);
-  out.op = op;
-  out.input[0] = &input1;
-  out.input[1] = &input2;
+  model_var *out = mv_create(model, rows, cols, flags);
+  out->op = op;
+  out->inputs[0] = &input1;
+  out->inputs[1] = &input2;
 
   return out;
 }
-model_var mv_relu(model_context &model, model_var &input, uint flags) {
+
+model_var *mv_relu(model_context &model, model_var &input, uint flags) {
   return unary_operation(model, input, flags, input.val->rows, input.val->cols,
                          model_var_operation::Relu);
 }
-model_var mv_softmax(model_context &model, model_var &input, uint flags) {
+model_var *mv_softmax(model_context &model, model_var &input, uint flags) {
   return unary_operation(model, input, flags, input.val->rows, input.val->cols,
                          model_var_operation::Softmax);
 }
-model_var mv_add(model_context &model, model_var &input1, model_var &input2,
-                 uint flags) {
+model_var *mv_add(model_context &model, model_var &input1, model_var &input2,
+                  uint flags) {
   return binary_operation(model, input1, input2, flags, input1.val->rows,
                           input1.val->cols, model_var_operation::Add);
 }
-model_var mv_sub(model_context *model, model_var *input, uint flags);
-model_var mv_cross_entropy(model_context *model, model_var *input, uint flags);
+model_var *mv_sub(model_context &model, model_var &input1, model_var &input2,
+                  uint flags) {
+  return binary_operation(model, input1, input2, flags, input1.val->rows,
+                          input1.val->cols, model_var_operation::Sub);
+}
+
+model_var *mv_matmul(model_context &model, model_var &input1, model_var &input2,
+                     uint flags) {
+  return binary_operation(model, input1, input2, flags, input1.val->rows,
+                          input2.val->cols, model_var_operation::Matmul);
+}
+model_var *mv_cross_entropy(model_context &model, model_var &input1,
+                            model_var &input2, uint flags) {
+  return binary_operation(model, input1, input2, flags, input1.val->rows,
+                          input1.val->cols, model_var_operation::Cross_entropy);
+}
+model_program model_program_create(const model_context &model,
+                                   model_var &root) {
+  std::vector<model_var *> out;
+
+  std::vector<bool> visited(model.num_vals);
+
+  std::function<void(model_var *)> dfs = [&](model_var *node) {
+    if (node == nullptr || node->index >= model.num_vals ||
+        visited[node->index]) {
+      return;
+    }
+
+    visited[node->index] = true;
+
+    for (int i = 0; i < get_mv_operatoin_input_number(node->op); i++) {
+      dfs(node->inputs[i]);
+    }
+
+    out.push_back(node);
+  };
+  dfs(&root);
+  return model_program{out, (int)out.size()};
+}
+
+void model_compile(model_context &model) {
+  if (model.output != nullptr) {
+    model.forward = model_program_create(model, *model.output);
+  }
+
+  if (model.desired_output != nullptr) {
+    model.cost_program = model_program_create(model, *model.cost);
+  }
+}
+
+void create_mnist_model(model_context &model) {
+  model_var *input = mv_create(model, 784, 1, MV_FLAG_INPUT);
+  model_var *y = mv_create(model, 10, 1, MV_FLAG_DESIRED_OUTPUT);
+  model_var *w0 =
+      mv_create(model, 16, 784, MV_FLAG_REQUIRES_GRAD | MV_FLAG_PARAMETER);
+  model_var *w1 =
+      mv_create(model, 16, 16, MV_FLAG_REQUIRES_GRAD | MV_FLAG_PARAMETER);
+  model_var *w2 =
+      mv_create(model, 10, 16, MV_FLAG_REQUIRES_GRAD | MV_FLAG_PARAMETER);
+
+  model_var *b0 =
+      mv_create(model, 16, 1, MV_FLAG_REQUIRES_GRAD | MV_FLAG_PARAMETER);
+  model_var *b1 =
+      mv_create(model, 16, 1, MV_FLAG_REQUIRES_GRAD | MV_FLAG_PARAMETER);
+  model_var *b2 =
+      mv_create(model, 10, 1, MV_FLAG_REQUIRES_GRAD | MV_FLAG_PARAMETER);
+
+  model_var *z0_a = mv_matmul(model, *w0, *model.input, 0);
+  model_var *z0_b = mv_add(model, *z0_a, *b0, 0);
+  model_var *a0 = mv_relu(model, *z0_b, 0);
+
+  model_var *z1_a = mv_matmul(model, *w1, *a0, 0);
+  model_var *z1_b = mv_add(model, *z1_a, *b1, 0);
+  model_var *r = mv_relu(model, *z1_b, 0);
+  model_var *a1 = mv_add(model, *a0, *r, 0);
+
+  model_var *z2_a = mv_matmul(model, *w2, *a1, 0);
+  model_var *z2_b = mv_add(model, *z2_a, *b2, 0);
+
+  model_var *p = mv_softmax(model, *z2_b, MV_FLAG_OUTPUT);
+  model_var *cost =
+      mv_cross_entropy(model, *model.desired_output, *p, MV_FLAG_COST);
+}
+
 int main() {
   std::vector<float> v{
       1.0, 2.0, 3.0, 4.0, 5.0, 9.0, 10.0, 11.0, 4.0,
@@ -383,5 +513,17 @@ int main() {
       std::cout << "\n";
     }
   }
+
+  model_context model;
+  create_mnist_model(model);
+  model_compile(model);
+  for (int i = 0; i < model.forward.num_vals; i++) {
+    std::cout << get_mv_operatoin_string(model.forward.vals[i]->op) << " ";
+  }
+  std::cout << "\n";
+  for (int i = 0; i < model.cost_program.num_vals; i++) {
+    std::cout << get_mv_operatoin_string(model.cost_program.vals[i]->op) << " ";
+  }
+
   return 0;
 };
