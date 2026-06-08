@@ -489,6 +489,18 @@ void create_mnist_model(model_context &model) {
       mv_cross_entropy(model, *model.desired_output, *p, MV_FLAG_COST);
 }
 
+void compute_model(model_program &program) {
+  for (int i = 0; i < program.num_vals; i++) {
+    model_var *cur = program.vals[i];
+    switch (cur->op) {
+    case model_var_operation::Null:;
+      break;
+    case model_var_operation::Relu:
+      mat_relu(program.vals[i]->val, program.vals[i]->inputs[0]);
+    }
+  }
+}
+
 int main() {
   std::vector<float> v{
       1.0, 2.0, 3.0, 4.0, 5.0, 9.0, 10.0, 11.0, 4.0,
