@@ -1,0 +1,4 @@
+venv/
+*.exe 
+*.mat
+__pycache__/
